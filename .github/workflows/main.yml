@@ -1,4 +1,4 @@
-name: RDP-Direct
+name: RDP + Tailscale Exit Node
 on:
   workflow_dispatch:
 jobs:
@@ -13,13 +13,13 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
 
-          # السماح بالـ RDP عبر جدار الحماية
-          netsh advfirewall firewall delete rule name="RDP-Direct"
-          netsh advfirewall firewall add rule name="RDP-Direct" dir=in action=allow protocol=TCP localport=3389
+          # فتح بورت RDP في جدار الحماية
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
 
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with Static Password
+      - name: Create RDP User
         run: |
           $password = "admin@123"
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
@@ -33,30 +33,37 @@ jobs:
 
           echo "RDP_CREDS=User: TOOLBOXLAP | Password: $password" >> $env:GITHUB_ENV
 
-      - name: Get Runner IP
+      - name: Install Tailscale
         run: |
-          $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -notlike "169.*"} | Select-Object -First 1 -ExpandProperty IPAddress)
-          echo "RUNNER_IP=$ip" >> $env:GITHUB_ENV
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
 
-      - name: Verify RDP Accessibility
+      - name: Connect Tailscale and Set Exit Node
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          Write-Host "RDP IP: $env:RUNNER_IP"
-          $testResult = Test-NetConnection -ComputerName $env:RUNNER_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
-          Write-Host "TCP connectivity successful!"
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=gh-runner-$env:GITHUB_RUN_ID
+          # تفعيل السيرفر كـ Exit Node
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" set --exit-node=$(hostname)
+          # جلب IP Tailscale
+          $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: Maintain Connection (Max 72 Hours)
+      - name: Show Connection Info
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:RUNNER_IP"
-          Write-Host "Username: TOOLBOXLAP"
-          Write-Host "Password: admin@123"
-          Write-Host "==================`n"
+          Write-Host "`n=== RDP + Tailscale Exit Node ==="
+          Write-Host "RDP Username: TOOLBOXLAP"
+          Write-Host "RDP Password: admin@123"
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          Write-Host "Use this IP to connect RDP via Tailscale"
+          Write-Host "===================================`n"
 
-          for ($i = 0; $i -lt 864; $i++) {  # 864 * 5min = 4320 min = 72 hours
-              Write-Host "[$(Get-Date)] RDP Active"
+      - name: Keep Runner Active (72 hours)
+        run: |
+          for ($i = 0; $i -lt 864; $i++) {
+              Write-Host "[$(Get-Date)] RDP + Exit Node Active"
               Start-Sleep -Seconds 300
           }
